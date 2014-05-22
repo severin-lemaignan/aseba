@@ -30,6 +30,8 @@ __author__ = "Séverin Lemaignan, Stéphane Magnenat"
 import dbus
 import time
 
+import xml.etree.ElementTree as ET
+
 from dbus.mainloop.glib import DBusGMainLoop
 import gobject
 # required to prevent the glib main loop to interfere with Python threads
@@ -53,6 +55,8 @@ class Aseba(object):
         self._events_last_evt = {}
         self._events_periods = {}
         self.events_freq = {}
+
+        self.eventnames = []
 
         if not dummy:
             DBusGMainLoop(set_as_default=True)
@@ -90,7 +94,6 @@ class Aseba(object):
             # /events_filters not yet created -> no events to delete
             return
 
-        import xml.etree.ElementTree as ET
         root = ET.fromstring(interface)
         for n in root.iter("node"):
             if 'name' in n.attrib:
@@ -149,11 +152,10 @@ class Aseba(object):
             return [int(dbus_array[x]) for x in range(0,size)]
 
     def send_event(self, event_id, event_args):
+        if self.dummy: return
 
         if isinstance(event_id, basestring):
-            return self.send_event_name(event_id, event_args)
-
-        if self.dummy: return
+            event_id = self._get_event_id(event_id)
 
         # events are sent asynchronously
         self.network.SendEvent(event_id, 
@@ -162,15 +164,27 @@ class Aseba(object):
                                error_handler=self.dbus_error)
 
 
-    def send_event_name(self, event_name, event_args):
-        if self.dummy: return
+    def load_events_list(self, path):
+        tree = ET.parse(path)
+        root = tree.getroot()
+        self.eventnames = [node.attrib['name'] for node in root if node.tag == "event"]
 
-        # events are sent asynchronously
-        self.network.SendEventName(event_name, 
-                                   event_args,
-                                   reply_handler=self.dbus_reply,
-                                   error_handler=self.dbus_error)
+    def get_event_frequency(self, event_id):
 
+        if isinstance(event_id, basestring):
+            event_id = self._get_event_id(event_id)
+
+        if event_id not in self.events_freq:
+            return 0
+
+        return self.events_freq[event_id] 
+
+
+    def _get_event_id(self, event_name):
+        if event_name in self.eventnames:
+            return self.eventnames.index(event_name)
+        raise AsebaException("Event %s is unknown. Did you load the list" \
+                             " of events with load_events_list?")
 
     def load_scripts(self, path):
         """ Loads a given Aseba script (aesl) on the Aseba network.
@@ -181,24 +195,17 @@ class Aseba(object):
     def _dispatch_events(self, *args):
         id, name, vals = args
 
-        key = None
+        if id in self.callbacks:
 
-        if name in self.callbacks:
-            key = name
-        elif id in self.callbacks:
-            # event registered from ID, not from name
-            key = id
-
-        if key:
-            self.callbacks[key](vals)
+            self.callbacks[id](vals)
 
             # update frequency for this event
             now = time.time()
-            self._events_periods[key].append(now - self._events_last_evt[key])
-            self._events_last_evt[key] = now
-            if len(self._events_periods[key]) == Aseba.NB_EVTS_FREQ:
-                self.events_freq[key] = 1. / (sum(self._events_periods[key]) / float(Aseba.NB_EVTS_FREQ))
-                self._events_periods[key] = []
+            self._events_periods[id].append(now - self._events_last_evt[id])
+            self._events_last_evt[id] = now
+            if len(self._events_periods[id]) == Aseba.NB_EVTS_FREQ:
+                self.events_freq[id] = 1. / (sum(self._events_periods[id]) / float(Aseba.NB_EVTS_FREQ))
+                self._events_periods[id] = []
 
     def on_event(self, event_id, cb):
         """
@@ -209,15 +216,15 @@ class Aseba(object):
         """
         if self.dummy: return
 
+        if isinstance(event_id, basestring):
+            event_id = self._get_event_id(event_id)
+ 
         self.callbacks[event_id] = cb
         self._events_last_evt[event_id] = time.time()
         self._events_periods[event_id] = []
         self.events_freq[event_id] = 0.
 
-        if isinstance(event_id, basestring):
-            self.events.ListenEventName(event_id)
-        else:
-            self.events.ListenEvent(event_id)
+        self.events.ListenEvent(event_id)
 
 # *** TEST ***
 if __name__ == '__main__':
